@@ -111,6 +111,37 @@ end
 
 結果テーブルの形式は自由（`winner`、`draw`、`ranking` など）。
 
+### オプション関数
+
+#### `visible_state(state, player_id) → filtered_state`
+
+指定プレイヤーに見える状態を返す。`bgt status` の表示とAIプレイヤーへの入力の両方でフィルタリングに使われる。未定義の場合は全stateがそのまま使われる。
+
+```lua
+function visible_state(state, player_id)
+  local s = deep_copy(state)
+  s.deck = nil  -- 山札は誰にも見えない
+  for _, p in ipairs(s.players) do
+    if p.id ~= player_id then
+      p.hand = nil  -- 他プレイヤーの手札を隠す
+    end
+  end
+  return s
+end
+```
+
+#### `describe(state, player_id) → string`
+
+ゲームのルールと現在の状況を自然言語で返す。AIプレイヤーのプロンプトに挿入され、判断精度を向上させる。未定義の場合はルール説明なしで動作する。
+
+```lua
+function describe(state, player_id)
+  return "【すごろくゲーム】\n"
+    .. "ルール: サイコロ(1-6)を振って進み、マス20に最初に到達したプレイヤーが勝利。\n"
+    .. "あなたはPlayer " .. player_id .. "です。"
+end
+```
+
 ### stateの規約
 
 | フィールド | 型 | 説明 |
