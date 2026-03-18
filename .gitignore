@@ -1,0 +1,10 @@
+# ビルド成果物
+bgt
+
+# セッションファイル（bgtが自動生成）
+.bgt_state.json
+.bgt_config.json
+.bgt_log.jsonl
+
+# Claude Code設定
+.claude
