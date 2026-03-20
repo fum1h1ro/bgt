@@ -36,6 +36,7 @@ type LogEntry struct {
 	Step        int                    `json:"step"`
 	PlayerID    int                    `json:"player_id"`
 	Action      map[string]interface{} `json:"action"`
+	Thought     string                 `json:"thought,omitempty"`
 	StateBefore map[string]interface{} `json:"state_before"`
 	StateAfter  map[string]interface{} `json:"state_after"`
 }
@@ -231,7 +232,7 @@ func (s *Session) Do(actionType string, args map[string]string) error {
 	}
 
 	// ステップを実行
-	newState, terminated, err := s.executeStep(eng, state, action, prog)
+	newState, terminated, err := s.executeStep(eng, state, action, prog, "")
 	if err != nil {
 		return err
 	}
@@ -291,14 +292,18 @@ func (s *Session) AI() error {
 		return err
 	}
 
-	chosen, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
+	chosen, thought, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("AIが選択: %v\n", chosen)
+	chosenJSON, _ := json.Marshal(chosen)
+	fmt.Printf("AIが選択: %s\n", chosenJSON)
+	if thought != "" {
+		fmt.Printf("  💭 %s\n", thought)
+	}
 
-	newState, terminated, err := s.executeStep(eng, state, chosen, prog)
+	newState, terminated, err := s.executeStep(eng, state, chosen, prog, thought)
 	if err != nil {
 		return err
 	}
@@ -378,17 +383,20 @@ func (s *Session) Auto() error {
 			return err
 		}
 
-		chosen, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
+		chosen, thought, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
 		if err != nil {
 			return err
 		}
 
 		chosenJSON, _ := json.Marshal(chosen)
 		fmt.Printf("[R%d T%d-%d] Player %d: %s\n", prog.Round, prog.Turn, prog.Step, prog.CurrentPlayer, chosenJSON)
+		if thought != "" {
+			fmt.Printf("  💭 %s\n", thought)
+		}
 
 		prevRound = prog.Round
 
-		newState, terminated, err := s.executeStep(eng, state, chosen, prog)
+		newState, terminated, err := s.executeStep(eng, state, chosen, prog, thought)
 		if err != nil {
 			return err
 		}
@@ -506,7 +514,7 @@ func (s *Session) excludeProgression(state map[string]interface{}) map[string]in
 }
 
 // executeStep はアクションを実行し、progressionを更新し、ラウンド終了判定を行う
-func (s *Session) executeStep(eng *LuaEngine, state map[string]interface{}, action map[string]interface{}, prog Progression) (map[string]interface{}, map[string]interface{}, error) {
+func (s *Session) executeStep(eng *LuaEngine, state map[string]interface{}, action map[string]interface{}, prog Progression, thought string) (map[string]interface{}, map[string]interface{}, error) {
 	// apply_action を呼び出す
 	newState, err := eng.ApplyAction(state, action, prog.CurrentPlayer)
 	if err != nil {
@@ -525,6 +533,7 @@ func (s *Session) executeStep(eng *LuaEngine, state map[string]interface{}, acti
 		Step:        prog.Step,
 		PlayerID:    prog.CurrentPlayer,
 		Action:      action,
+		Thought:     thought,
 		StateBefore: state,
 		StateAfter:  newState,
 	})
