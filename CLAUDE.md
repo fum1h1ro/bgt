@@ -24,13 +24,12 @@ bgt/                        # ツール本体
 ├── engine/
 │   ├── loop.go             # ゲームループ
 │   ├── lua.go              # Luaブリッジ
+│   ├── rand.go             # ランダム処理（サイコロ等）
 │   └── claude.go           # Claude APIプレイヤー
 └── CLAUDE.md
 
 games/                      # ゲームロジック（ユーザーが作成）
-├── kaiteitan/
-│   └── game.lua
-└── my_new_game/
+└── kaiteitan/
     └── game.lua
 ```
 
@@ -213,6 +212,12 @@ end
 - 各ターンのプレイヤーをすべてClaudeが担当
 - 結果と全ログを`.bgt_log.jsonl`に保存
 - 複数回実行してバランス検証に使用することを想定
+
+## 開発コマンド
+
+- `go build ./...` — ビルド
+- `go vet ./...` — 静的解析
+- テストファイルは現時点では未作成
 
 ## 将来の拡張（現時点では実装不要）
 
