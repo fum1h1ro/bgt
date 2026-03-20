@@ -8,9 +8,7 @@ function setup(config)
   end
   return {
     players = players,
-    current_player = 1,
     goal = 20,
-    turn = 1,
   }
 end
 
@@ -29,9 +27,6 @@ function apply_action(state, action, player_id)
     if p.position > new_state.goal then
       p.position = new_state.goal
     end
-    -- 次のプレイヤーに交代
-    new_state.current_player = (player_id % #new_state.players) + 1
-    new_state.turn = new_state.turn + 1
   end
   return new_state
 end
