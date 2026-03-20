@@ -29,7 +29,8 @@ func NewClaudePlayer() (*ClaudePlayer, error) {
 }
 
 // ChooseAction はClaudeにアクションを選択させる
-func (c *ClaudePlayer) ChooseAction(state map[string]interface{}, actions []map[string]interface{}, playerID int, description string) (map[string]interface{}, error) {
+// 戻り値: 選択したアクション, AIの思考メモ, エラー
+func (c *ClaudePlayer) ChooseAction(state map[string]interface{}, actions []map[string]interface{}, playerID int, description string) (map[string]interface{}, string, error) {
 	stateJSON, _ := json.MarshalIndent(state, "", "  ")
 	actionsJSON, _ := json.Marshal(actions)
 
@@ -47,27 +48,33 @@ func (c *ClaudePlayer) ChooseAction(state map[string]interface{}, actions []map[
 取れる行動：
 %s
 
-選んだ行動をJSONで返してください。JSONのみを返し、他のテキストは含めないでください。
-例: {"type": "take_card"}`, playerID, descSection, stateJSON, actionsJSON)
+以下のJSON形式で返してください。JSONのみを返し、他のテキストは含めないでください。
+- action: 選んだ行動
+- thought: 現在の状況認識と行動の理由（1〜2文で簡潔に）
+
+例: {"action": {"type": "take_card"}, "thought": "相手より点数が低いので、カードを引いて逆転を狙う"}`, playerID, descSection, stateJSON, actionsJSON)
 
 	// 最大3回リトライ
 	for attempt := 0; attempt < 3; attempt++ {
 		result, err := c.callAPI(prompt)
 		if err != nil {
 			if attempt == 2 {
-				return nil, fmt.Errorf("Claude APIの呼び出しに失敗（3回リトライ後）: %w", err)
+				return nil, "", fmt.Errorf("Claude APIの呼び出しに失敗（3回リトライ後）: %w", err)
 			}
 			continue
 		}
 
 		// JSONをパース
-		action, err := parseActionJSON(result)
+		parsed, err := parseActionJSON(result)
 		if err != nil {
 			if attempt == 2 {
-				return nil, fmt.Errorf("Claudeの応答をパースできません: %s", result)
+				return nil, "", fmt.Errorf("Claudeの応答をパースできません: %s", result)
 			}
 			continue
 		}
+
+		// action と thought を抽出
+		action, thought := extractActionAndThought(parsed)
 
 		// 有効なアクションか検証
 		actionType, _ := action["type"].(string)
@@ -80,15 +87,31 @@ func (c *ClaudePlayer) ChooseAction(state map[string]interface{}, actions []map[
 		}
 		if !valid {
 			if attempt == 2 {
-				return nil, fmt.Errorf("Claudeが無効なアクションを選択しました: %s", actionType)
+				return nil, "", fmt.Errorf("Claudeが無効なアクションを選択しました: %s", actionType)
 			}
 			continue
 		}
 
-		return action, nil
+		return action, thought, nil
 	}
 
-	return nil, fmt.Errorf("Claudeからの応答を取得できませんでした")
+	return nil, "", fmt.Errorf("Claudeからの応答を取得できませんでした")
+}
+
+// extractActionAndThought はパース結果からactionとthoughtを抽出する
+// {"action": {...}, "thought": "..."} 形式と、旧形式 {"type": "..."} の両方に対応
+func extractActionAndThought(parsed map[string]interface{}) (map[string]interface{}, string) {
+	thought, _ := parsed["thought"].(string)
+
+	if actionRaw, ok := parsed["action"]; ok {
+		if action, ok := actionRaw.(map[string]interface{}); ok {
+			return action, thought
+		}
+	}
+
+	// 旧形式: actionキーがなく直接 {"type": "..."} の場合
+	delete(parsed, "thought")
+	return parsed, thought
 }
 
 type apiRequest struct {
@@ -114,7 +137,7 @@ type apiResponse struct {
 func (c *ClaudePlayer) callAPI(prompt string) (string, error) {
 	reqBody := apiRequest{
 		Model:     c.model,
-		MaxTokens: 256,
+		MaxTokens: 512,
 		Messages: []apiMessage{
 			{Role: "user", Content: prompt},
 		},
