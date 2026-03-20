@@ -28,15 +28,15 @@ func main() {
 
 	case "start":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "使い方: bgt start <人数>")
+			fmt.Fprintln(os.Stderr, "使い方: bgt start <人数> [--seed=N]")
 			os.Exit(1)
 		}
-		numPlayers, parseErr := strconv.Atoi(os.Args[2])
+		numPlayers, seed, parseErr := parseStartArgs(os.Args[2:])
 		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "人数が不正です: %s\n", os.Args[2])
+			fmt.Fprintf(os.Stderr, "引数が不正です: %v\n", parseErr)
 			os.Exit(1)
 		}
-		err = session.Start(numPlayers)
+		err = session.Start(numPlayers, seed)
 
 	case "status":
 		err = session.Status()
@@ -78,12 +78,36 @@ func parseArgs(rawArgs []string) map[string]string {
 	return args
 }
 
+func parseStartArgs(args []string) (numPlayers int, seed int64, err error) {
+	seed = engine.NewSeed()
+	foundPlayers := false
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--seed=") {
+			seedStr := strings.TrimPrefix(arg, "--seed=")
+			seed, err = strconv.ParseInt(seedStr, 10, 64)
+			if err != nil {
+				return 0, 0, fmt.Errorf("seedが不正です: %s", seedStr)
+			}
+		} else if !foundPlayers {
+			numPlayers, err = strconv.Atoi(arg)
+			if err != nil {
+				return 0, 0, fmt.Errorf("人数が不正です: %s", arg)
+			}
+			foundPlayers = true
+		}
+	}
+	if !foundPlayers {
+		return 0, 0, fmt.Errorf("人数が指定されていません")
+	}
+	return numPlayers, seed, nil
+}
+
 func printUsage() {
 	fmt.Println(`bgt - Board Game Tester
 
 使い方:
   bgt init <game.luaのパス>   ゲームロジックを読み込み
-  bgt start <人数>            ゲーム開始
+  bgt start <人数> [--seed=N] ゲーム開始（seedで乱数固定）
   bgt status                  現在の状態を表示
   bgt do <action> [args]      アクションを実行
   bgt ai                      AIに1手判断させる
