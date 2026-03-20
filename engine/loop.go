@@ -19,14 +19,25 @@ type Config struct {
 	GameLuaPath string `json:"game_lua_path"`
 }
 
+// Progression はゲーム進行の階層状態を管理する
+type Progression struct {
+	Round         int `json:"round"`
+	Turn          int `json:"turn"`
+	Step          int `json:"step"`
+	CurrentPlayer int `json:"current_player"`
+	NumPlayers    int `json:"num_players"`
+}
+
 // LogEntry はアクションログの1エントリ
 type LogEntry struct {
-	Timestamp     string                 `json:"timestamp"`
-	Turn          string                 `json:"turn"`
-	PlayerID      int                    `json:"player_id"`
-	Action        map[string]interface{} `json:"action"`
-	StateBefore   map[string]interface{} `json:"state_before"`
-	StateAfter    map[string]interface{} `json:"state_after"`
+	Timestamp   string                 `json:"timestamp"`
+	Round       int                    `json:"round"`
+	Turn        int                    `json:"turn"`
+	Step        int                    `json:"step"`
+	PlayerID    int                    `json:"player_id"`
+	Action      map[string]interface{} `json:"action"`
+	StateBefore map[string]interface{} `json:"state_before"`
+	StateAfter  map[string]interface{} `json:"state_after"`
 }
 
 // Session はゲームセッションを管理する
@@ -82,6 +93,28 @@ func (s *Session) Start(numPlayers int) error {
 		return err
 	}
 
+	// _progression を注入
+	prog := Progression{
+		Round:         1,
+		Turn:          1,
+		Step:          1,
+		CurrentPlayer: 1,
+		NumPlayers:    numPlayers,
+	}
+	state["_progression"] = progressionToMap(prog)
+
+	// Lua側のcurrent_player/turnは不要になるが、互換性のため残さない
+	delete(state, "current_player")
+	delete(state, "turn")
+
+	// on_round_start を呼び出す（ラウンド1の開始）
+	state, err = eng.OnRoundStart(state, 1)
+	if err != nil {
+		return err
+	}
+	// _progression を再注入（Lua側が消す可能性があるため）
+	state["_progression"] = progressionToMap(prog)
+
 	if err := s.saveState(state); err != nil {
 		return err
 	}
@@ -111,7 +144,7 @@ func (s *Session) Status() error {
 	}
 	defer eng.Close()
 
-	currentPlayer := s.getCurrentPlayer(state)
+	prog := s.getProgression(state)
 
 	// 終了判定
 	terminal, err := eng.IsTerminal(state)
@@ -125,18 +158,20 @@ func (s *Session) Status() error {
 		return nil
 	}
 
-	actions, err := eng.ValidActions(state, currentPlayer)
+	actions, err := eng.ValidActions(state, prog.CurrentPlayer)
 	if err != nil {
 		return err
 	}
 
-	// 可視状態をフィルタリング
-	visibleState, err := eng.VisibleState(state, currentPlayer)
+	// 可視状態をフィルタリング（_progressionを除外）
+	visibleState, err := eng.VisibleState(state, prog.CurrentPlayer)
 	if err != nil {
 		return err
 	}
+	visibleState = s.excludeProgression(visibleState)
 
-	fmt.Printf("現在のプレイヤー: Player %d\n", currentPlayer)
+	fmt.Printf("現在のプレイヤー: Player %d\n", prog.CurrentPlayer)
+	fmt.Printf("ラウンド: %d  ターン: %d  ステップ: %d\n", prog.Round, prog.Turn, prog.Step)
 	stateJSON, _ := json.MarshalIndent(visibleState, "", "  ")
 	fmt.Printf("state: %s\n", stateJSON)
 	actionsJSON, _ := json.Marshal(actions)
@@ -162,9 +197,9 @@ func (s *Session) Do(actionType string, args map[string]string) error {
 	}
 	defer eng.Close()
 
-	currentPlayer := s.getCurrentPlayer(state)
+	prog := s.getProgression(state)
 
-	actions, err := eng.ValidActions(state, currentPlayer)
+	actions, err := eng.ValidActions(state, prog.CurrentPlayer)
 	if err != nil {
 		return err
 	}
@@ -195,36 +230,21 @@ func (s *Session) Do(actionType string, args map[string]string) error {
 		action[k] = v
 	}
 
-	// アクションを適用
-	newState, err := eng.ApplyAction(state, action, currentPlayer)
+	// ステップを実行
+	newState, terminated, err := s.executeStep(eng, state, action, prog)
 	if err != nil {
 		return err
 	}
 
-	if err := s.saveState(newState); err != nil {
-		return err
-	}
+	newProg := s.getProgression(newState)
+	fmt.Printf("Player %d が %s を実行しました\n", prog.CurrentPlayer, actionType)
 
-	s.appendLog(LogEntry{
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Turn:        s.calcTurn(state),
-		PlayerID:    currentPlayer,
-		Action:      action,
-		StateBefore: state,
-		StateAfter:  newState,
-	})
-
-	fmt.Printf("Player %d が %s を実行しました\n", currentPlayer, actionType)
-
-	// 終了判定
-	terminal, err := eng.IsTerminal(newState)
-	if err != nil {
-		return err
-	}
-	if terminal != nil {
+	if terminated != nil {
 		fmt.Println("ゲーム終了！")
-		termJSON, _ := json.MarshalIndent(terminal, "", "  ")
+		termJSON, _ := json.MarshalIndent(terminated, "", "  ")
 		fmt.Printf("結果: %s\n", termJSON)
+	} else {
+		fmt.Printf("次: Player %d（R%d T%d-%d）\n", newProg.CurrentPlayer, newProg.Round, newProg.Turn, newProg.Step)
 	}
 
 	return nil
@@ -248,9 +268,9 @@ func (s *Session) AI() error {
 	}
 	defer eng.Close()
 
-	currentPlayer := s.getCurrentPlayer(state)
+	prog := s.getProgression(state)
 
-	actions, err := eng.ValidActions(state, currentPlayer)
+	actions, err := eng.ValidActions(state, prog.CurrentPlayer)
 	if err != nil {
 		return err
 	}
@@ -260,52 +280,36 @@ func (s *Session) AI() error {
 		return err
 	}
 
-	visibleState, err := eng.VisibleState(state, currentPlayer)
+	visibleState, err := eng.VisibleState(state, prog.CurrentPlayer)
+	if err != nil {
+		return err
+	}
+	visibleState = s.excludeProgression(visibleState)
+
+	description, err := eng.Describe(state, prog.CurrentPlayer)
 	if err != nil {
 		return err
 	}
 
-	description, err := eng.Describe(state, currentPlayer)
-	if err != nil {
-		return err
-	}
-
-	chosen, err := claude.ChooseAction(visibleState, actions, currentPlayer, description)
+	chosen, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("AIが選択: %v\n", chosen)
 
-	newState, err := eng.ApplyAction(state, chosen, currentPlayer)
+	newState, terminated, err := s.executeStep(eng, state, chosen, prog)
 	if err != nil {
 		return err
 	}
 
-	if err := s.saveState(newState); err != nil {
-		return err
-	}
-
-	s.appendLog(LogEntry{
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Turn:        s.calcTurn(state),
-		PlayerID:    currentPlayer,
-		Action:      chosen,
-		StateBefore: state,
-		StateAfter:  newState,
-	})
-
-	// 終了判定
-	terminal, err := eng.IsTerminal(newState)
-	if err != nil {
-		return err
-	}
-	if terminal != nil {
+	if terminated != nil {
 		fmt.Println("ゲーム終了！")
-		termJSON, _ := json.MarshalIndent(terminal, "", "  ")
+		termJSON, _ := json.MarshalIndent(terminated, "", "  ")
 		fmt.Printf("結果: %s\n", termJSON)
 	}
 
+	_ = newState
 	return nil
 }
 
@@ -332,6 +336,8 @@ func (s *Session) Auto() error {
 		return err
 	}
 
+	prevRound := 0
+
 	for {
 		// 終了判定
 		terminal, err := eng.IsTerminal(state)
@@ -345,47 +351,54 @@ func (s *Session) Auto() error {
 			return nil
 		}
 
-		currentPlayer := s.getCurrentPlayer(state)
+		prog := s.getProgression(state)
 
-		actions, err := eng.ValidActions(state, currentPlayer)
+		// ラウンド変更の表示
+		if prevRound != 0 && prog.Round != prevRound {
+			fmt.Printf("--- ラウンド %d 終了 ---\n", prevRound)
+			fmt.Printf("--- ラウンド %d 開始 ---\n", prog.Round)
+		} else if prevRound == 0 {
+			// 初回
+			prevRound = prog.Round
+		}
+
+		actions, err := eng.ValidActions(state, prog.CurrentPlayer)
 		if err != nil {
 			return err
 		}
 
-		visibleState, err := eng.VisibleState(state, currentPlayer)
+		visibleState, err := eng.VisibleState(state, prog.CurrentPlayer)
+		if err != nil {
+			return err
+		}
+		visibleState = s.excludeProgression(visibleState)
+
+		description, err := eng.Describe(state, prog.CurrentPlayer)
 		if err != nil {
 			return err
 		}
 
-		description, err := eng.Describe(state, currentPlayer)
+		chosen, err := claude.ChooseAction(visibleState, actions, prog.CurrentPlayer, description)
 		if err != nil {
 			return err
 		}
 
-		chosen, err := claude.ChooseAction(visibleState, actions, currentPlayer, description)
+		chosenJSON, _ := json.Marshal(chosen)
+		fmt.Printf("[R%d T%d-%d] Player %d: %s\n", prog.Round, prog.Turn, prog.Step, prog.CurrentPlayer, chosenJSON)
+
+		prevRound = prog.Round
+
+		newState, terminated, err := s.executeStep(eng, state, chosen, prog)
 		if err != nil {
 			return err
 		}
 
-		turnStr := s.calcTurn(state)
-		fmt.Printf("[ターン%s] Player %d: %v\n", turnStr, currentPlayer, chosen)
-
-		newState, err := eng.ApplyAction(state, chosen, currentPlayer)
-		if err != nil {
-			return err
+		if terminated != nil {
+			fmt.Println("\nゲーム終了！")
+			termJSON, _ := json.MarshalIndent(terminated, "", "  ")
+			fmt.Printf("結果: %s\n", termJSON)
+			return nil
 		}
-
-		if err := s.saveState(newState); err != nil {
-			return err
-		}
-
-		s.appendLog(LogEntry{
-			Timestamp:   time.Now().Format(time.RFC3339),
-			PlayerID:    currentPlayer,
-			Action:      chosen,
-			StateBefore: state,
-			StateAfter:  newState,
-		})
 
 		state = newState
 	}
@@ -440,44 +453,154 @@ func (s *Session) appendLog(entry LogEntry) {
 	f.Write([]byte("\n"))
 }
 
-func (s *Session) getCurrentPlayer(state map[string]interface{}) int {
-	if cp, ok := state["current_player"]; ok {
-		switch v := cp.(type) {
-		case float64:
-			return int(v)
-		case json.Number:
-			n, _ := v.Int64()
-			return int(n)
-		}
+// getProgression はstateから_progressionを取得する
+func (s *Session) getProgression(state map[string]interface{}) Progression {
+	prog := Progression{Round: 1, Turn: 1, Step: 1, CurrentPlayer: 1, NumPlayers: 1}
+	raw, ok := state["_progression"]
+	if !ok {
+		return prog
 	}
-	return 1
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return prog
+	}
+	if v := toInt(m["round"]); v > 0 {
+		prog.Round = v
+	}
+	if v := toInt(m["turn"]); v > 0 {
+		prog.Turn = v
+	}
+	if v := toInt(m["step"]); v > 0 {
+		prog.Step = v
+	}
+	if v := toInt(m["current_player"]); v > 0 {
+		prog.CurrentPlayer = v
+	}
+	if v := toInt(m["num_players"]); v > 0 {
+		prog.NumPlayers = v
+	}
+	return prog
 }
 
-// getNumPlayers はstateからプレイヤー数を取得する
-func (s *Session) getNumPlayers(state map[string]interface{}) int {
-	if players, ok := state["players"]; ok {
-		if arr, ok := players.([]interface{}); ok {
-			return len(arr)
-		}
+// progressionToMap はProgressionをmap[string]interface{}に変換する
+func progressionToMap(p Progression) map[string]interface{} {
+	return map[string]interface{}{
+		"round":          float64(p.Round),
+		"turn":           float64(p.Turn),
+		"step":           float64(p.Step),
+		"current_player": float64(p.CurrentPlayer),
+		"num_players":    float64(p.NumPlayers),
 	}
-	return 1
 }
 
-// calcTurn はstateのturn（1始まりの連番）からx-y形式のターン文字列を返す
-// x: ラウンド（全員が1回ずつプレイで1ラウンド）、y: ラウンド内のステップ
-func (s *Session) calcTurn(state map[string]interface{}) string {
-	turn := 1
-	if t, ok := state["turn"]; ok {
-		switch v := t.(type) {
-		case float64:
-			turn = int(v)
-		case json.Number:
-			n, _ := v.Int64()
-			turn = int(n)
+// excludeProgression はstateのコピーから_progressionを除外して返す
+func (s *Session) excludeProgression(state map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(state))
+	for k, v := range state {
+		if k == "_progression" {
+			continue
 		}
+		result[k] = v
 	}
-	numPlayers := s.getNumPlayers(state)
-	round := (turn-1)/numPlayers + 1
-	step := (turn-1)%numPlayers + 1
-	return fmt.Sprintf("%d-%d", round, step)
+	return result
+}
+
+// executeStep はアクションを実行し、progressionを更新し、ラウンド終了判定を行う
+func (s *Session) executeStep(eng *LuaEngine, state map[string]interface{}, action map[string]interface{}, prog Progression) (map[string]interface{}, map[string]interface{}, error) {
+	// apply_action を呼び出す
+	newState, err := eng.ApplyAction(state, action, prog.CurrentPlayer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Lua側が返したcurrent_player/turnを_progressionの値で上書き
+	delete(newState, "current_player")
+	delete(newState, "turn")
+
+	// ログ記録
+	s.appendLog(LogEntry{
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Round:       prog.Round,
+		Turn:        prog.Turn,
+		Step:        prog.Step,
+		PlayerID:    prog.CurrentPlayer,
+		Action:      action,
+		StateBefore: state,
+		StateAfter:  newState,
+	})
+
+	// progression を進める
+	newProg := prog
+	newProg.Step++
+	newProg.CurrentPlayer = (prog.CurrentPlayer % prog.NumPlayers) + 1
+	if newProg.Step > newProg.NumPlayers {
+		newProg.Turn++
+		newProg.Step = 1
+	}
+
+	// _progression を更新
+	newState["_progression"] = progressionToMap(newProg)
+
+	// is_round_over チェック
+	roundOver, err := eng.IsRoundOver(newState)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if roundOver {
+		// on_round_end
+		newState, err = eng.OnRoundEnd(newState)
+		if err != nil {
+			return nil, nil, err
+		}
+		// _progression を再注入（Lua側が消す可能性があるため）
+		newState["_progression"] = progressionToMap(newProg)
+
+		// is_terminal チェック（ラウンド終了時）
+		terminal, err := eng.IsTerminal(newState)
+		if err != nil {
+			return nil, nil, err
+		}
+		if terminal != nil {
+			if err := s.saveState(newState); err != nil {
+				return nil, nil, err
+			}
+			return newState, terminal, nil
+		}
+
+		// 次のラウンドへ
+		newProg.Round++
+		newProg.Turn = 1
+		newProg.Step = 1
+		newProg.CurrentPlayer = 1
+		newState["_progression"] = progressionToMap(newProg)
+
+		// on_round_start
+		newState, err = eng.OnRoundStart(newState, newProg.Round)
+		if err != nil {
+			return nil, nil, err
+		}
+		// _progression を再注入
+		newState["_progression"] = progressionToMap(newProg)
+	}
+
+	if err := s.saveState(newState); err != nil {
+		return nil, nil, err
+	}
+
+	return newState, nil, nil
+}
+
+// toInt は各種数値型をintに変換する
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case int:
+		return n
+	}
+	return 0
 }

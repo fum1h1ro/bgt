@@ -186,6 +186,87 @@ func (e *LuaEngine) IsTerminal(state map[string]interface{}) (map[string]interfa
 	return result, nil
 }
 
+// IsRoundOver はLuaのis_round_over(state)を呼び出す
+// 未定義の場合は「1ターン完了（全員1回行動）= ラウンド終了」をデフォルトとする
+func (e *LuaEngine) IsRoundOver(state map[string]interface{}) (bool, error) {
+	fn := e.L.GetGlobal("is_round_over")
+	if fn == lua.LNil {
+		// デフォルト: step==1 かつ turn>1 → 全員が1回行動してターンが進んだ
+		// つまり turn が 2 以上になったら1ターン=1ラウンド終了
+		if prog, ok := state["_progression"].(map[string]interface{}); ok {
+			turn := 0
+			switch v := prog["turn"].(type) {
+			case float64:
+				turn = int(v)
+			case json.Number:
+				i, _ := v.Int64()
+				turn = int(i)
+			}
+			return turn > 1, nil
+		}
+		return false, nil
+	}
+
+	stateLua := goToLua(e.L, state)
+	if err := e.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, stateLua); err != nil {
+		return false, fmt.Errorf("is_round_over() の呼び出しに失敗: %w", err)
+	}
+
+	ret := e.L.Get(-1)
+	e.L.Pop(1)
+
+	if ret == lua.LNil || ret == lua.LFalse {
+		return false, nil
+	}
+	return true, nil
+}
+
+// OnRoundStart はLuaのon_round_start(state, round_number)を呼び出す
+// 未定義の場合はstateをそのまま返す
+func (e *LuaEngine) OnRoundStart(state map[string]interface{}, roundNumber int) (map[string]interface{}, error) {
+	fn := e.L.GetGlobal("on_round_start")
+	if fn == lua.LNil {
+		return state, nil
+	}
+
+	stateLua := goToLua(e.L, state)
+	if err := e.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, stateLua, lua.LNumber(roundNumber)); err != nil {
+		return nil, fmt.Errorf("on_round_start() の呼び出しに失敗: %w", err)
+	}
+
+	ret := e.L.Get(-1)
+	e.L.Pop(1)
+
+	result, ok := luaToGo(ret).(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("on_round_start() がテーブルを返しませんでした")
+	}
+	return result, nil
+}
+
+// OnRoundEnd はLuaのon_round_end(state)を呼び出す
+// 未定義の場合はstateをそのまま返す
+func (e *LuaEngine) OnRoundEnd(state map[string]interface{}) (map[string]interface{}, error) {
+	fn := e.L.GetGlobal("on_round_end")
+	if fn == lua.LNil {
+		return state, nil
+	}
+
+	stateLua := goToLua(e.L, state)
+	if err := e.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, stateLua); err != nil {
+		return nil, fmt.Errorf("on_round_end() の呼び出しに失敗: %w", err)
+	}
+
+	ret := e.L.Get(-1)
+	e.L.Pop(1)
+
+	result, ok := luaToGo(ret).(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("on_round_end() がテーブルを返しませんでした")
+	}
+	return result, nil
+}
+
 // goToLua はGoの値をLuaの値に変換する
 func goToLua(L *lua.LState, value interface{}) lua.LValue {
 	if value == nil {

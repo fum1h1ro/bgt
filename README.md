@@ -38,7 +38,7 @@ bgt auto                            # 終了まで全自動プレイ
 
 ゲームの初期状態を返す。`config.players` にプレイヤー人数が渡される。
 
-返すstateには **`current_player`**（現在のプレイヤーID、1始まり）と **`turn`**（ターン番号、1始まり）と **`players`**（プレイヤーの配列）を含めること。
+返すstateには **`players`**（プレイヤーの配列）を含めること。`current_player` や `turn` はGoが `_progression` として自動管理するため、返す必要はない。
 
 ```lua
 function setup(config)
@@ -48,8 +48,6 @@ function setup(config)
   end
   return {
     players = players,
-    current_player = 1,
-    turn = 1,
     -- ゲーム固有のフィールドを自由に追加
   }
 end
@@ -76,7 +74,7 @@ end
 
 アクションを適用して新しいstateを返す。**元のstateは変更しないこと**（`deep_copy` を使う）。
 
-ターン管理（`current_player` の更新、`turn` のインクリメント）もこの関数内で行う。
+プレイヤー交代やターン管理はGoが自動で行うため、`current_player` や `turn` の更新は不要。
 
 ```lua
 function apply_action(state, action, player_id)
@@ -86,17 +84,13 @@ function apply_action(state, action, player_id)
     -- ゲーム固有の処理
   end
 
-  -- 次のプレイヤーに交代
-  new_state.current_player = (player_id % #new_state.players) + 1
-  new_state.turn = new_state.turn + 1
-
   return new_state
 end
 ```
 
 #### `is_terminal(state) → result or nil`
 
-ゲームが終了していれば結果テーブルを、継続中なら `nil` を返す。
+ゲームが終了していれば結果テーブルを、継続中なら `nil` を返す。ラウンド終了時にのみ呼び出される。
 
 ```lua
 function is_terminal(state)
@@ -112,6 +106,44 @@ end
 結果テーブルの形式は自由（`winner`、`draw`、`ranking` など）。
 
 ### オプション関数
+
+#### `is_round_over(state) → true or nil`
+
+ラウンドが終了したかを判定する。毎ステップ後に呼び出される。未定義の場合は「1ターン完了（全員1回行動）= ラウンド終了」。
+
+```lua
+function is_round_over(state)
+  -- 例: 特定の条件でラウンドを終了させる
+  if state.round_should_end then
+    return true
+  end
+  return nil
+end
+```
+
+#### `on_round_start(state, round_number) → state`
+
+ラウンド開始時に呼び出される。カードを配り直すなどの処理に使う。未定義の場合はstateそのまま。
+
+```lua
+function on_round_start(state, round_number)
+  local new_state = deep_copy(state)
+  -- 手札を配り直すなど
+  return new_state
+end
+```
+
+#### `on_round_end(state) → state`
+
+ラウンド終了時に呼び出される（`is_terminal` の前）。スコア集計などに使う。未定義の場合はstateそのまま。
+
+```lua
+function on_round_end(state)
+  local new_state = deep_copy(state)
+  -- スコア集計など
+  return new_state
+end
+```
 
 #### `visible_state(state, player_id) → filtered_state`
 
@@ -146,12 +178,11 @@ end
 
 | フィールド | 型 | 説明 |
 |---|---|---|
-| `current_player` | number | 現在のプレイヤーID（1始まり）。**必須** |
-| `turn` | number | ターン連番（1始まり）。**必須** |
 | `players` | table(配列) | プレイヤー情報の配列。**必須** |
+| `_progression` | table | Goが自動管理（round, turn, step, current_player, num_players）。**Lua側では触らない** |
 | その他 | 任意 | ゲーム固有の状態を自由に追加 |
 
-`turn` はログの `turn` フィールド（`ラウンド-ステップ` 形式）の算出に使われる。全プレイヤーが1回ずつプレイすると1ラウンド。
+ゲーム進行は Session > Round > Turn > Step の4層で管理される。`_progression` は `bgt status` やAIプレイヤーへの表示時には自動的に除外される。
 
 ### Go側から提供される関数
 
@@ -191,9 +222,7 @@ function setup(config)
   end
   return {
     players = players,
-    current_player = 1,
     goal = 20,
-    turn = 1,
   }
 end
 
@@ -212,8 +241,6 @@ function apply_action(state, action, player_id)
     if p.position > new_state.goal then
       p.position = new_state.goal
     end
-    new_state.current_player = (player_id % #new_state.players) + 1
-    new_state.turn = new_state.turn + 1
   end
   return new_state
 end
@@ -243,7 +270,9 @@ end
 ```json
 {
   "timestamp": "2026-03-17T11:34:43+09:00",
-  "turn": "1-1",
+  "round": 1,
+  "turn": 1,
+  "step": 1,
   "player_id": 1,
   "action": {"type": "roll_die"},
   "state_before": { "..." },
@@ -251,4 +280,4 @@ end
 }
 ```
 
-`turn` は `ラウンド-ステップ` 形式。2人ゲームなら `1-1`, `1-2`, `2-1`, `2-2`, ... と進む。
+`round`, `turn`, `step` はそれぞれ整数値。3人ゲームなら step が 1→2→3 と進み、全員行動するとturnが進み、ラウンド終了条件を満たすとroundが進む。
