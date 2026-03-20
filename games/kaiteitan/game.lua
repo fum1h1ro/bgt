@@ -4,7 +4,7 @@
 function setup(config)
   local players = {}
   for i = 1, config.players do
-    players[i] = { id = i, position = 0 }
+    players[i] = { id = i, position = 0, charged = false }
   end
   return {
     players = players,
@@ -15,22 +15,36 @@ function setup(config)
 end
 
 function valid_actions(state, player_id)
-  return {
-    { type = "roll_die" }
-  }
+  if state.players[player_id].charged then
+    return {
+      { type = "roll_die" }
+    }
+  else
+    return {
+      { type = "roll_die" },
+      { type = "charge" },
+    }
+  end
 end
 
 function apply_action(state, action, player_id)
   local new_state = deep_copy(state)
   if action.type == "roll_die" then
     local roll = bgt.roll(6)
+    if state.players[player_id].charged then
+      roll = roll * 2
+    end
     local p = new_state.players[player_id]
     p.position = p.position + roll
+    p.charged = false
     if p.position > new_state.goal then
       p.position = new_state.goal
     end
     new_state.last_roll = roll
     new_state.last_player = player_id
+  elseif action.type == "charge" then
+    local p = new_state.players[player_id]
+    p.charged = true
   end
   return new_state
 end
@@ -48,6 +62,7 @@ function describe(state, player_id)
 
   return "【すごろくゲーム】\n"
     .. "ルール: サイコロ(1-6)を振って進み、マス" .. state.goal .. "に最初に到達したプレイヤーが勝利。\n"
+    .. "charge すると、次の手番の時サイコロの目が2倍になる。\n"
     .. "現在位置: " .. table.concat(positions, ", ") .. "\n"
     .. last_action
     .. "あなたはPlayer " .. player_id .. "です。"
