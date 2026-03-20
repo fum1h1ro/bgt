@@ -17,6 +17,7 @@ const (
 // Config はbgtの設定
 type Config struct {
 	GameLuaPath string `json:"game_lua_path"`
+	Seed        int64  `json:"seed"`
 }
 
 // Progression はゲーム進行の階層状態を管理する
@@ -74,10 +75,17 @@ func (s *Session) Init(luaPath string) error {
 }
 
 // Start はゲームを開始する
-func (s *Session) Start(numPlayers int) error {
+func (s *Session) Start(numPlayers int, seed int64) error {
 	cfg, err := s.loadConfig()
 	if err != nil {
 		return err
+	}
+
+	SetSeed(seed)
+	cfg.Seed = seed
+	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configFile, cfgData, 0644); err != nil {
+		return fmt.Errorf("設定ファイルの書き込みに失敗: %w", err)
 	}
 
 	eng, err := NewLuaEngine(cfg.GameLuaPath)
@@ -123,7 +131,7 @@ func (s *Session) Start(numPlayers int) error {
 	// ログファイルをクリア
 	os.Remove(logFile)
 
-	fmt.Printf("ゲームを開始しました（%d人プレイヤー）\n", numPlayers)
+	fmt.Printf("ゲームを開始しました（%d人プレイヤー, seed=%d）\n", numPlayers, seed)
 	return nil
 }
 
@@ -323,6 +331,10 @@ func (s *Session) Auto() error {
 	cfg, err := s.loadConfig()
 	if err != nil {
 		return err
+	}
+
+	if cfg.Seed != 0 {
+		SetSeed(cfg.Seed)
 	}
 
 	state, err := s.loadState()
